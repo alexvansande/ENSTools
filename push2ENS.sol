@@ -27,36 +27,51 @@ pragma solidity ^0.8.0;
 
 import "./supportsENS.sol";
 
-abstract contract ERC20 {
-    function transferFrom(address from, address to, uint tokens) virtual public returns (bool success);
-    function transfer(address to, uint tokens) virtual public returns (bool success);
-}
-
-abstract contract ERC721 {
-    function transferFrom(address _from, address _to, uint256 _tokenId) virtual public;
+// works for both Tokens and NFTs
+abstract contract Transferable {
+    function transferFrom(address from, address to, uint tokens) virtual public;
 }
 
 contract PushToENS is SupportsENS {
 
-  mapping(bytes32 => uint256) public balances;
+  mapping(bytes32 => Balance) public balances;
 
-  event Pushed(bytes32 nameHash, address tokenAddress, uint8 sendType, uint256 amount);
-  event Pulled(bytes32 nameHash, address tokenAddress, uint8 sendType, uint256 amount);
+  struct Balance {
+      uint256 withdrawable;
+      uint256 lastBlockPulled;
+      mapping(address => uint256) pusher;
+      mapping(address => uint256) lastPushed;
+  }
+
+  event Pushed(bytes32 nameHash, address assetAddress, uint8 sendType, uint256 amount);
+  event Pulled(bytes32 nameHash, address assetAddress, uint8 sendType, uint256 amount);
+  event Cancel(bytes32 nameHash, address assetAddress, uint8 sendType, uint256 amount);
 
   // PUSH FUNCTIONS
 
    /**
     * @dev Generic internal push functions
     */
-  function _push (bytes32 hash, uint256 amount, address tokenAddress, uint8 sendType) internal {
-    //prevent overflow
-    require(balances[hash]+amount>balances[hash], "Not enough funds");
+  function _push (bytes32 hash, uint256 amount, address assetAddress, uint8 sendType) internal {
+    Balance storage balance = balances[hash];
 
-    //increase the balance
-    balances[hash] += amount;
+    // If there was a pull since you last pushed, then you can't withdraw that amount anymore
+    if (balance.lastPushed[msg.sender] < balance.lastBlockPulled) balance.pusher[msg.sender]=0;
+
+    // Weird things can happen in the same block
+    require(balance.lastPushed[msg.sender] != balance.lastBlockPulled || balance.lastBlockPulled == 0, "You can't push the same block on a pull");
+
+    // Prevent Overflows
+    require(balance.pusher[msg.sender] + amount > balance.pusher[msg.sender] , "Overflow detected!");
+    require(balance.withdrawable + amount > balance.withdrawable , "Overflow detected!");
+
+    // Increase the balances
+    balance.withdrawable  += amount;
+    balance.pusher[msg.sender]+= amount;
+    balance.lastPushed[msg.sender] = block.number;
 
     // tell everyone about it
-    emit Pushed(hash, tokenAddress, sendType, amount);
+    emit Pushed(hash, assetAddress, sendType, amount);
   }
 
    /**
@@ -74,52 +89,54 @@ contract PushToENS is SupportsENS {
   }
 
    /**
-    * @dev Pushes any amount of a given token for an ENS address
+    * @dev Pushes any amount of a given token or NFT for an ENS address.
+    * @dev If it's a token, leave nftId as 0. Can't send any NFT with id 0.
     */
-  function pushTokens2ENS (bytes32 nameHash, address tokenAddress, uint256 amount) public {
+  function pushAsset2ENS (bytes32 nameHash, address assetAddress, uint256 amount, uint256 nftId) public {
      // instantiate token
-     ERC20 token = ERC20(tokenAddress);
-     // transfer tokens
-     require(token.transferFrom(msg.sender, address(this), amount), "Token transfer failed");
-     // save
-    _push(keccak256(abi.encode(nameHash,tokenAddress)), amount, tokenAddress, 2);
-  }
+     Transferable asset = Transferable(assetAddress);
+     uint256 wat;
 
-   /**
-    * @dev Pushes an single NFT for an ENS address
-    */
-   function pushNFT2ENS (bytes32 nameHash, address nftAddress, uint256 tokenId) public {
-     // instantiate token
-     ERC721 nft = ERC721(nftAddress);
-     // transfer NFT
-     nft.transferFrom(msg.sender, address(this), tokenId);
-     // save
-    _push(keccak256(abi.encode(nameHash, nftAddress, tokenId)), tokenId, nftAddress, 3);
-  }
+     if (nftId==0) {
+        // If fungible, then add all balances
+        wat = amount;
+        _push(keccak256(abi.encode(nameHash,assetAddress)), amount, assetAddress, 2);
+     } else {
+       // If not, then use amount as the nft ID
+       wat = nftId;
+        _push(keccak256(abi.encode(nameHash,assetAddress,nftId)), nftId, assetAddress, 3);
+    }
 
+    // transfer assets. Doesn't add a require, assumes token will revert if fails
+    asset.transferFrom(msg.sender, address(this), wat);
+  }
 
   // PULL FUNCTIONS
 
    /**
     * @dev Generic internal pull function
     */
-  function _pull (bytes32 hash, uint256 amount, address tokenAddress, uint8 sendType) internal {
-    //Checks
-    require(balances[hash]>=amount, "Not enough funds");
+  function _pull (bytes32 hash, address assetAddress, uint8 sendType) internal returns (uint256 amount){
+    Balance storage balance = balances[hash];
 
-    //Effects
-    balances[hash]-=amount;
+    amount = balance.withdrawable;
+
+    //Pull full amount always
+    balance.withdrawable=0;
+    balance.lastBlockPulled = block.number;
 
     // Interaction
-    emit Pushed(hash, tokenAddress, sendType, amount);
+    emit Pulled(hash, assetAddress, sendType, amount );
+
+    return amount;
   }
 
    /**
     * @dev Pulls ether for any valid ENS name. Can be called by anyone
     */
-  function pullEther2ENS (bytes32 nameHash, uint256 amount) public {
-      //generic pull
-      _pull(nameHash, amount, 0x0000000000000000000000000000000000000000, 0);
+  function pullEther2ENS (bytes32 nameHash) public {
+      // Zeroes out full balance
+      uint256 amount = _pull(nameHash, 0x0000000000000000000000000000000000000000, 0);
 
       //Interaction
       // getSafeENSAddress prevents returning empty address
@@ -127,46 +144,109 @@ contract PushToENS is SupportsENS {
   }
 
    /**
-    * @dev Pulls ether for any ethereum address. Can be called by anyone
+    * @dev Pulls ether for any ethereum address. Can only be called by self
     */
-  function pullEther2Ethadd (address payable ethAddress, uint256 amount) public {
-      //generic pull
-      _pull(keccak256(abi.encode(ethAddress)), amount, 0x0000000000000000000000000000000000000000, 1);
+  function pullEther2Ethadd () public {
+      // Zeroes out full balance
+      uint256 amount = _pull(keccak256(abi.encode(msg.sender)), 0x0000000000000000000000000000000000000000, 1);
+
+      //Interaction
+      sendValue(payable(msg.sender), amount);
+  }
+
+   /**
+    * @dev Pulls any amount of a given token or NFT to a valid ENS address. Can be called by anyone.
+    * @dev If it's a token, leave nftId as 0. Can't send any NFT with id 0.
+    */
+  function pullAsset2ENS (bytes32 nameHash, address assetAddress, uint nftId) public {
+       // instantiate token
+     Transferable asset = Transferable(assetAddress);
+    uint256 wat;
+    // If it's a token then use nftId as 0
+    if (nftId==0){
+      //if ID is 0 then it's a token
+      wat = _pull(keccak256(abi.encode(nameHash,assetAddress)), assetAddress, 2);
+    } else {
+      //if ID is set then it's an NFT
+      wat = nftId;
+      _pull(keccak256(abi.encode(nameHash, assetAddress, nftId)), assetAddress, 3);
+    }
+
+    // getSafeENSAddress prevents returning empty address
+      asset.transferFrom(address(this), getSafeENSAddress(nameHash), wat);
+  }
+
+    // CANCEL FUNCTIONS
+
+   /**
+    * @dev Generic internal cancel function
+    */
+  function _cancel (bytes32 hash, uint256 amount, address assetAddress, uint8 sendType) internal {
+     Balance storage balance = balances[hash];
+
+    // Can only cancel if there wasn't a push yet
+    require(balance.lastPushed[msg.sender] > balance.lastBlockPulled || balance.lastBlockPulled == 0, "Recipient already withdrew");
+
+    // Check if enough balance
+    require(amount <= balance.pusher[msg.sender] , "Not enough balance");
+    require(amount <= balance.withdrawable , "Not enough balance");
+
+    // Decrease both balances
+    balance.pusher[msg.sender]-= amount;
+    balance.withdrawable -= amount;
+
+    // Interaction
+    emit Cancel(hash, assetAddress, sendType, amount );
+  }
+
+  /**
+    * @dev Get back ether you had sent to an ENS name but hasn't been claimed yet.
+    */
+  function cancelEther2ENS (bytes32 nameHash, uint256 amount) public {
+      // Zeroes out full balance
+      _cancel(nameHash, amount, 0x0000000000000000000000000000000000000000, 0);
 
       //Interaction
       // getSafeENSAddress prevents returning empty address
-      sendValue(payable(ethAddress), amount);
+      sendValue(payable(msg.sender), amount);
+  }
+
+
+   /**
+    * @dev Get back ether you had sent to an eth address but hasn't been claimed yet.
+    */
+  function cancelEther2Ethadd (address payable ethAddress, uint256 amount) public {
+      // Zeroes out full balance
+       _cancel(keccak256(abi.encode(ethAddress)), amount, 0x0000000000000000000000000000000000000000, 1);
+
+      //Interaction
+      sendValue(payable(msg.sender), amount);
   }
 
    /**
-    * @dev Pulls any amount of a given token to a valid ENS address. Can be called by anyone
+    * @dev Get back tokens or NFT you had sent to an ENS name but hasn't been claimed yet.
     */
-  function pullToken2ENS (bytes32 nameHash, address tokenAddress, uint256 amount) public {
+  function cancelAsset2ENS (bytes32 nameHash,  address assetAddress, uint256 amount, uint256 nftId) public {
        // instantiate token
-     ERC20 token = ERC20(tokenAddress);
-
-     //generic pull
-      _pull(keccak256(abi.encode(nameHash,tokenAddress)), amount, tokenAddress, 2);
-
-     // transfer tokens
+     Transferable asset = Transferable(assetAddress);
+     uint256 wat;
+     //generic cancel
      // getSafeENSAddress prevents returning empty address
-     token.transfer(getSafeENSAddress(nameHash), amount);
+     if (nftId==0) {
+       // If it's a token then pull all of them
+       wat= amount;
+       _cancel(keccak256(abi.encode(nameHash,assetAddress)), amount, assetAddress, 2);
+     } else {
+       // if it's an NFT use amount as tokenId
+       wat=nftId;
+       _cancel(keccak256(abi.encode(nameHash, assetAddress, amount)), amount, assetAddress, 3);
+     }
+
+    // transfer tokens
+    asset.transferFrom(address(this), msg.sender, wat);
+
   }
 
-   /**
-    * @dev Pulls one of any type of NFT to a valid ENS address. Can be called by anyone
-    */
-  function pullNFT2ENS (bytes32 nameHash, address nftAddress, uint256 tokenId) public {
-       // instantiate token
-     ERC721 NFT = ERC721(nftAddress);
-
-     //generic pull
-      _pull(keccak256(abi.encode(nameHash, nftAddress, tokenId)), tokenId, nftAddress, 3);
-
-     // transfer tokens
-     // getSafeENSAddress prevents returning empty address
-     NFT.transferFrom(address(this), getSafeENSAddress(nameHash), tokenId);
-  }
 
      /**
      * Open Zeppellin's Send Value
