@@ -24,6 +24,10 @@
 // because I was too lazy to build my own onerc721Received. Be careful out there.
 
 pragma solidity ^0.8.0;
+/// @title Push to ENS
+/// @author Alex Van de Sande
+/// @notice Allows tokens and ether to be deposited to ENS names
+/// @dev Supports ether, erc20 tokens and erc721 NFTs.
 
 import "./supportsENS.sol";
 
@@ -34,6 +38,8 @@ abstract contract Transferable {
 
 contract PushToENS is SupportsENS {
 
+  /// @notice Internal balance function
+  /// @dev Balances are a hash based on token and account information
   mapping(bytes32 => Balance) public balances;
 
   struct Balance {
@@ -75,22 +81,29 @@ contract PushToENS is SupportsENS {
   }
 
    /**
-    * @dev Pushes ether sent in transaction for an ENS name
+    * @notice Pushes ether sent in transaction for an ENS name represented by `nameHash`
+    * @param nameHash a 256-bit hash that represents an ENS name. See: https://docs.ens.domains/contract-api-reference/name-processing
     */
   function pushEther2ENS (bytes32 nameHash) public payable {
     _push(nameHash, msg.value, 0x0000000000000000000000000000000000000000, 0);
   }
 
    /**
-    * @dev Pushes ether sent in transaction for a normal address
+    * @notice Pushes ether sent in transaction for `ethAddress`
+    * @param ethAddress a standard ethereum compatible address
     */
   function pushEther2Ethadd (address ethAddress) public payable {
     _push(keccak256(abi.encode(ethAddress)), msg.value, 0x0000000000000000000000000000000000000000, 1);
   }
 
    /**
-    * @dev Pushes any amount of a given token or NFT for an ENS address.
+    * @notice Pushes `amount` standard units of the `assetAddress` token for an ENS address represented by `nameHash`.
+    * @notice If `nftId` is set, then it assumes it's a ERC721 NFT and sends the one with `nftId`.
     * @dev If it's a token, leave nftId as 0. Can't send any NFT with id 0.
+    * @param nameHash a 256-bit hash that represents an ENS name. See: https://docs.ens.domains/contract-api-reference/name-processing
+    * @param assetAddress The address of either the token or NFT
+    * @param amount Token amount. If it's an NFT, leave 0.
+    * @param nftId the id of the NFT being sent. If it's a token, leave 0.
     */
   function pushAsset2ENS (bytes32 nameHash, address assetAddress, uint256 amount, uint256 nftId) public {
      // instantiate token
@@ -132,7 +145,9 @@ contract PushToENS is SupportsENS {
   }
 
    /**
-    * @dev Pulls ether for any valid ENS name. Can be called by anyone
+    * @notice Pulls ether for any valid ENS name.
+    * @dev Function can be called by anyone. Will revert if ENS name is not set, or set to 0x.
+    * @param nameHash a 256-bit hash that represents an ENS name. See: https://docs.ens.domains/contract-api-reference/name-processing
     */
   function pullEther2ENS (bytes32 nameHash) public {
       // Zeroes out full balance
@@ -144,7 +159,8 @@ contract PushToENS is SupportsENS {
   }
 
    /**
-    * @dev Pulls ether for any ethereum address. Can only be called by self
+    * @notice Pulls all ether pushed for your address.
+    * @dev Can only be called by the address receiving the token.
     */
   function pullEther2Ethadd () public {
       // Zeroes out full balance
@@ -155,9 +171,14 @@ contract PushToENS is SupportsENS {
   }
 
    /**
-    * @dev Pulls any amount of a given token or NFT to a valid ENS address. Can be called by anyone.
-    * @dev If it's a token, leave nftId as 0. Can't send any NFT with id 0.
-    */
+    * @notice Pulls all of the balance from token `assetAddress` for the ENS address represented by `nameHash`.
+    * @notice If `nftId` is set, then it assumes it's a NFT and pulls the one with `nftId`.
+    * @dev Can be called by anyone. If it's a token, leave nftId as 0. Can only pull full amounts.
+    * @dev Function will revert if ENS is not set or set to 0x0.
+    * @param nameHash a 256-bit hash that represents an ENS name. See: https://docs.ens.domains/contract-api-reference/name-processing
+    * @param assetAddress The address of either the token or NFT
+    * @param nftId the id of the NFT being sent. If it's a token, leave 0.
+     */
   function pullAsset2ENS (bytes32 nameHash, address assetAddress, uint nftId) public {
        // instantiate token
      Transferable asset = Transferable(assetAddress);
@@ -200,10 +221,12 @@ contract PushToENS is SupportsENS {
   }
 
   /**
-    * @dev Get back ether you had sent to an ENS name but hasn't been claimed yet.
+    * @dev Get back `amount/1000000000000000000` ether you had pushed to an ENS name but it hasn't pulled yet.
+    * @param nameHash a 256-bit hash that represents an ENS name. See: https://docs.ens.domains/contract-api-reference/name-processing
+    * @param amount Ether amount you want to get back.
     */
   function cancelEther2ENS (bytes32 nameHash, uint256 amount) public {
-      // Zeroes out full balance
+      // Generic cancel function
       _cancel(nameHash, amount, 0x0000000000000000000000000000000000000000, 0);
 
       //Interaction
@@ -213,10 +236,12 @@ contract PushToENS is SupportsENS {
 
 
    /**
-    * @dev Get back ether you had sent to an eth address but hasn't been claimed yet.
+    * @dev Get back `amount/1000000000000000000` ether you had pushed to an Eth address name but it hasn't pulled yet.
+    * @param ethAddress The address which you had pushed to.
+    * @param amount Ether amount you want to get back.
     */
-  function cancelEther2Ethadd (address payable ethAddress, uint256 amount) public {
-      // Zeroes out full balance
+  function cancelEther2Ethadd (address ethAddress, uint256 amount) public {
+      // Generic cancel function
        _cancel(keccak256(abi.encode(ethAddress)), amount, 0x0000000000000000000000000000000000000000, 1);
 
       //Interaction
@@ -224,7 +249,11 @@ contract PushToENS is SupportsENS {
   }
 
    /**
-    * @dev Get back tokens or NFT you had sent to an ENS name but hasn't been claimed yet.
+    * @notice Get back tokens or NFT you had pushed to an ENS name but hasn't been claimed yet.
+    * @param nameHash a 256-bit hash that represents an ENS name. See: https://docs.ens.domains/contract-api-reference/name-processing
+    * @param assetAddress The address of either the token or NFT
+    * @param amount Amount you want to pull back
+    * @param nftId the id of the NFT being sent. If it's a token, leave 0.
     */
   function cancelAsset2ENS (bytes32 nameHash,  address assetAddress, uint256 amount, uint256 nftId) public {
        // instantiate token
