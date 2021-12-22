@@ -268,7 +268,7 @@ contract PushToENS is SupportsENS {
      } else {
        // if it's an NFT use amount as tokenId
        wat=nftId;
-       _cancel(keccak256(abi.encode(nameHash, assetAddress, amount)), amount, assetAddress, 3);
+       _cancel(keccak256(abi.encode(nameHash, assetAddress, nftId)), nftId, assetAddress, 3);
      }
 
     // transfer tokens
